@@ -157,17 +157,27 @@ def run_prophet(train, test):
 
 
 def run_lstm(train, test, lookback=24):
-    """Run LSTM model."""
+    """Run LSTM model with improved stability and reproducibility."""
     try:
+        import tensorflow as tf
         from tensorflow.keras.models import Sequential
         from tensorflow.keras.layers import LSTM, Dense
         from tensorflow.keras.callbacks import EarlyStopping
+        import numpy as np
         import warnings
         warnings.filterwarnings('ignore')
         
+        # Set seeds for reproducibility
+        np.random.seed(42)
+        tf.random.set_seed(42)
+        
+        # Combine for consistent scaling
+        combined_series = pd.concat([train, test])
         scaler = MinMaxScaler()
-        train_scaled = scaler.fit_transform(train.values.reshape(-1, 1))
-        test_scaled = scaler.transform(test.values.reshape(-1, 1))
+        combined_scaled = scaler.fit_transform(combined_series.values.reshape(-1, 1))
+        
+        train_scaled = combined_scaled[:len(train)]
+        test_scaled = combined_scaled[len(train):]
         
         def create_sequences(data, lookback_):
             X, y = [], []
@@ -178,12 +188,15 @@ def run_lstm(train, test, lookback=24):
         
         X_train, y_train = create_sequences(train_scaled, lookback)
         
+        if len(X_train) == 0:
+            raise ValueError("Not enough data for LSTM sequences.")
+        
         model = Sequential()
-        model.add(LSTM(64, input_shape=(lookback, 1)))
+        model.add(LSTM(32, input_shape=(lookback, 1)))  # Reduced from 64 → 32
         model.add(Dense(1))
         model.compile(optimizer="adam", loss="mse")
         
-        es = EarlyStopping(patience=5, restore_best_weights=True)
+        es = EarlyStopping(patience=5, restore_best_weights=True, verbose=0)
         
         model.fit(
             X_train, y_train,
@@ -194,23 +207,31 @@ def run_lstm(train, test, lookback=24):
             verbose=0,
         )
         
-        combined = np.concatenate([train_scaled[-lookback:], test_scaled], axis=0)
-        X_test, y_test = create_sequences(combined, lookback)
+        # Build test sequences using last `lookback` of train + test
+        seed = train_scaled[-lookback:]
+        forecast_input = seed.copy()
+        forecast_scaled = []
         
-        y_pred_scaled = model.predict(X_test, verbose=0)
-        y_pred = scaler.inverse_transform(y_pred_scaled).flatten()
+        for _ in range(len(test)):
+            X_pred = forecast_input[-lookback:].reshape(1, lookback, 1)
+            y_pred = model.predict(X_pred, verbose=0)
+            forecast_scaled.append(y_pred[0, 0])
+            forecast_input = np.append(forecast_input, y_pred)
         
-        forecast_series = pd.Series(y_pred[-len(test):], index=test.index)
-        rmse, mae, mape, r2 = eval_metrics(test.values[-len(y_pred):], y_pred[-len(test):])
+        forecast_scaled = np.array(forecast_scaled).reshape(-1, 1)
+        forecast = scaler.inverse_transform(forecast_scaled).flatten()
         
-        return forecast_series, {"RMSE": rmse, "MAE": mae, "MAPE": mape, "R2": r2}
+        # Align length
+        forecast = forecast[:len(test)]
+        rmse, mae, mape, r2 = eval_metrics(test.values, forecast)
+        
+        return pd.Series(forecast, index=test.index), {"RMSE": rmse, "MAE": mae, "MAPE": mape, "R2": r2}
     except ImportError:
         st.warning("TensorFlow not installed. Using Holt's method instead.")
         return run_holts_method(train, test, "LSTM")
     except Exception as e:
         st.warning(f"LSTM failed: {e}. Using fallback.")
         return run_holts_method(train, test, "LSTM")
-
 
 def run_exponential_smoothing(train, test, model_name):
     """Fallback exponential smoothing method."""
@@ -491,6 +512,9 @@ def main():
     - `Latency` (ms) - optional
     - `Location` - optional
     """)
+    st.sidebar.markdown("""
+⚠️ **Note**: Ensure `Timestamp` is in a consistent time zone with no DST gaps.
+""")
     
     uploaded_file = st.sidebar.file_uploader("Upload QoS CSV file", type=["csv"], help="Upload your ISP's QoS monitoring data in CSV format")
     test_days = st.sidebar.slider("Forecast Horizon (days)", min_value=3, max_value=14, value=7, help="Number of days to use for testing/forecasting")
@@ -509,12 +533,14 @@ def main():
         st.dataframe(example_df)
         return
     
-    try:
-        df = load_data(uploaded_file)
-        st.sidebar.success(f"✅ Loaded {len(df):,} records")
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
-        return
+   try:
+    df = load_data(uploaded_file)
+    if len(df) > 100_000:
+        st.sidebar.warning(f"⚠️ Large dataset ({len(df):,} rows). Processing may be slow.")
+    st.sidebar.success(f"✅ Loaded {len(df):,} records")
+except Exception as e:
+    st.error(f"Error loading data: {e}")
+    return
     
     selected_location = None
     if "Location" in df.columns:
@@ -568,14 +594,22 @@ def main():
     
     st.markdown('<div class="section-title">🤖 B. Model Performance Comparison</div>', unsafe_allow_html=True)
     
-    with st.spinner("Training forecasting models... This may take a few minutes."):
-        arima_forecast, arima_metrics = run_arima(train, test)
-        sarima_forecast, sarima_metrics = run_sarima(train, test)
-        prophet_forecast, prophet_metrics = run_prophet(train, test)
-        lstm_forecast, lstm_metrics = run_lstm(train, test)
+st.markdown('<div class="section-title">🤖 B. Model Performance Comparison</div>', unsafe_allow_html=True)
+
+with st.spinner("Training forecasting models... This may take a few minutes."):
+    import time
+    start_time = time.time()
     
-    all_metrics = {"ARIMA": arima_metrics, "SARIMA": sarima_metrics, "Prophet": prophet_metrics, "LSTM": lstm_metrics}
-    forecasts = {"ARIMA": arima_forecast, "SARIMA": sarima_forecast, "Prophet": prophet_forecast, "LSTM": lstm_forecast}
+    arima_forecast, arima_metrics = run_arima(train, test)
+    sarima_forecast, sarima_metrics = run_sarima(train, test)
+    prophet_forecast, prophet_metrics = run_prophet(train, test)
+    lstm_forecast, lstm_metrics = run_lstm(train, test)
+    
+    elapsed_time = time.time() - start_time
+
+# Rest of the code continues below...
+all_metrics = {"ARIMA": arima_metrics, "SARIMA": sarima_metrics, "Prophet": prophet_metrics, "LSTM": lstm_metrics}
+forecasts = {"ARIMA": arima_forecast, "SARIMA": sarima_forecast, "Prophet": prophet_forecast, "LSTM": lstm_forecast}
     
     best_model_name = min(all_metrics.keys(), key=lambda m: all_metrics[m]["RMSE"])
     best_metrics = all_metrics[best_model_name]
@@ -585,7 +619,8 @@ def main():
     st.dataframe(metrics_df.style.highlight_min(axis=0, subset=["RMSE", "MAE", "MAPE"]).highlight_max(axis=0, subset=["R2"]))
     
     st.success(f"✅ Best Model Selected: **{best_model_name}** (Lowest RMSE: {best_metrics['RMSE']:.4f})")
-    
+    st.caption(f"✅ All models trained in {elapsed_time:.1f} seconds")
+
     st.markdown("""
     <div class="interpretation-box">
     <strong>📖 Model Metrics Interpretation:</strong><br>
@@ -678,9 +713,13 @@ def main():
     
     st.markdown('<div class="section-title">⚠️ E. Capacity Recommendation & Congestion Risk Hours</div>', unsafe_allow_html=True)
     
-    peak_bw = float(best_forecast.max())
-    peak_time = best_forecast.idxmax()
-    recommended_capacity = 1.20 * peak_bw
+    # Use 95th percentile to avoid outlier-driven over-provisioning
+peak_bw = float(best_forecast.quantile(0.95))
+# Pick a representative high-demand timestamp (first above 90th percentile)
+threshold = best_forecast.quantile(0.90)
+high_demand_hours = best_forecast[best_forecast >= threshold]
+peak_time = high_demand_hours.index[0] if not high_demand_hours.empty else best_forecast.index[0]
+recommended_capacity = 1.20 * peak_bw
     
     col_c1, col_c2, col_c3 = st.columns(3)
     col_c1.metric("Peak Forecast BW", f"{peak_bw:.2f} Mbps")
