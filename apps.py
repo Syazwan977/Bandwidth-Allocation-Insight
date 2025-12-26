@@ -7,7 +7,10 @@ import io
 from math import sqrt
 from datetime import datetime
 
+
+
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -774,48 +777,59 @@ def main():
         })
         risk_df["Gap_Mbps"] = risk_df["Forecast_Required_Mbps"] - risk_df["Allocated_Mbps"]
         
-        def label_risk(gap):
-            if pd.isna(gap) or gap <= 0:
-                return "No Risk"
-            if gap < 5:
-                return "Low"
-            if gap < 15:
-                return "Medium"
-            return "High"
-        
-        risk_df["Risk_Level"] = risk_df["Gap_Mbps"].apply(label_risk)
-        
-        congested = risk_df[risk_df["Gap_Mbps"] > 0].copy()
-        
-        if not congested.empty:
-            fig3, ax3 = plt.subplots(figsize=(14, 4))
-            
-            colors_map = {"High": "#ef4444", "Medium": "#f59e0b", "Low": "#22c55e"}
-            bar_colors = [colors_map.get(r, "#64748b") for r in congested["Risk_Level"]]
-            
-            x_positions = range(len(congested))
-            ax3.bar(x_positions, congested["Gap_Mbps"].values, color=bar_colors)
-            
-            n = max(1, len(congested) // 20)
-            ax3.set_xticks(x_positions[::n])
-            ax3.set_xticklabels([format_date(t)[-11:] for t in congested["Time"].values[::n]], rotation=45, ha="right")
-            
-            ax3.set_ylabel("Bandwidth Gap (Mbps)")
-            ax3.set_title("Congestion Risk Hours (Forecast Demand > Allocated)")
-            ax3.grid(True, alpha=0.3, axis="y")
-            
-            from matplotlib.patches import Patch
-            legend_elements = [
-                Patch(facecolor="#ef4444", label="High Risk (>15 Mbps)"),
-                Patch(facecolor="#f59e0b", label="Medium Risk (5-15 Mbps)"),
-                Patch(facecolor="#22c55e", label="Low Risk (<5 Mbps)")
-            ]
-            ax3.legend(handles=legend_elements, loc="upper right")
-            
-            plt.tight_layout()
-            st.pyplot(fig3)
-        else:
-            st.success("✅ No congestion predicted! Allocated bandwidth is sufficient.")
+def label_risk(gap):
+    if pd.isna(gap) or gap <= 0:
+        return "No Risk"
+    if gap < 5:
+        return "Low"
+    if gap < 15:
+        return "Medium"
+    return "High"
+
+risk_df["Risk_Level"] = risk_df["Gap_Mbps"].apply(label_risk)
+
+congested = risk_df[risk_df["Gap_Mbps"] > 0].copy()
+
+if not congested.empty:
+    fig3, ax3 = plt.subplots(figsize=(14, 4))
+
+    colors_map = {"High": "#ef4444", "Medium": "#f59e0b", "Low": "#22c55e"}
+    bar_colors = [colors_map.get(r, "#64748b") for r in congested["Risk_Level"]]
+
+    # Ensure Time column is datetime
+    congested["Time"] = pd.to_datetime(congested["Time"], errors="coerce")
+
+    # Plot using datetime axis (IMPORTANT)
+    ax3.bar(
+        congested["Time"],
+        congested["Gap_Mbps"].values,
+        color=bar_colors,
+        width=0.02
+    )
+
+    # Datetime-safe tick handling
+    ax3.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax3.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m %H:%M"))
+    ax3.tick_params(axis="x", rotation=45)
+
+    ax3.set_ylabel("Bandwidth Gap (Mbps)")
+    ax3.set_title("Congestion Risk Hours (Forecast Demand > Allocated)")
+    ax3.grid(True, alpha=0.3, axis="y")
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor="#ef4444", label="High Risk (>15 Mbps)"),
+        Patch(facecolor="#f59e0b", label="Medium Risk (5–15 Mbps)"),
+        Patch(facecolor="#22c55e", label="Low Risk (<5 Mbps)")
+    ]
+    ax3.legend(handles=legend_elements, loc="upper right")
+
+    plt.tight_layout()
+    st.pyplot(fig3)
+
+else:
+    st.success("✅ No congestion predicted! Allocated bandwidth is sufficient.")
+
     
     st.markdown("""
     <div class="interpretation-box">
