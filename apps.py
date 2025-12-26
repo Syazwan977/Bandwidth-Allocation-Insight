@@ -146,9 +146,16 @@ def eval_metrics(true, pred):
 
 
 def format_date(dt):
-    """Format datetime as DD/MM/YYYY HH:MM."""
-    if pd.isna(dt):
+    """Safely format datetime-like objects as DD/MM/YYYY HH:MM."""
+    if dt is None or pd.isna(dt):
         return "N/A"
+
+    # Convert numpy / pandas datetime safely
+    try:
+        dt = pd.to_datetime(dt)
+    except Exception:
+        return str(dt)
+
     return dt.strftime("%d/%m/%Y %H:%M")
 
 
